@@ -48,7 +48,7 @@ def _count_classical(gray, cfg: dict, debug) -> list[detect.Detection]:
     """
     mask = segment.clean_mask(segment.binarize(gray, cfg, debug), cfg, debug)
     separated = segment.split_touching(gray, mask, cfg, debug=debug, radius_hint=None)
-    candidates = detect.filter_by_shape(detect.extract_candidates(separated, cfg), cfg)
+    candidates = detect.filter_by_shape(detect.extract_candidates(separated, cfg, gray), cfg)
     radius = detect.estimate_radius(candidates, cfg)
 
     # Pass 2: re-binarize and re-seed at the estimated bar size, then re-filter.
@@ -57,13 +57,14 @@ def _count_classical(gray, cfg: dict, debug) -> list[detect.Detection]:
             segment.binarize(gray, cfg, debug, radius_hint=radius), cfg, debug
         )
         separated = segment.split_touching(gray, mask, cfg, debug=debug, radius_hint=radius)
-        candidates = detect.filter_by_shape(detect.extract_candidates(separated, cfg), cfg)
+        candidates = detect.filter_by_shape(detect.extract_candidates(separated, cfg, gray), cfg)
         candidates = detect.filter_by_relative_area(candidates, cfg, radius)
         refined = detect.estimate_radius(candidates, cfg)
         radius = refined if refined is not None else radius
 
     if radius is not None:
         candidates = detect.filter_radius_outliers(candidates, cfg, radius)
+    candidates = detect.filter_intensity_outliers(candidates, cfg)
 
     if debug:
         debug.save("components", draw.colorize_components(separated))
@@ -74,7 +75,7 @@ def _count_hough(gray, cfg: dict, debug) -> list[detect.Detection]:
     """Alternative branch: classical pass only to estimate scale, then HoughCircles."""
     mask = segment.clean_mask(segment.binarize(gray, cfg, debug), cfg, debug)
     separated = segment.split_touching(gray, mask, cfg, debug=debug, radius_hint=None)
-    seed_candidates = detect.filter_by_shape(detect.extract_candidates(separated, cfg), cfg)
+    seed_candidates = detect.filter_by_shape(detect.extract_candidates(separated, cfg, gray), cfg)
     radius = detect.estimate_radius(seed_candidates, cfg)
     if debug:
         debug.save("components", draw.colorize_components(separated))

@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Generate synthetic rebar-stack images with an exactly known count.
 
-Real photos do not exist yet, so this is the first correctness check for the
-pipeline: gray circles on a light background, hex-packed so a chosen fraction of
-them touch or overlap - which is precisely what the watershed step must undo.
+Real photos do not exist yet, so this is the only correctness check the pipeline
+has. The variants below walk SPEC 7's diversity matrix as far as a renderer can:
+packing density, per-bar brightness (rust next to shiny), noise, lighting gradient,
+viewing angle, background texture, glare, and several bundles in one frame.
 
-    python tests/make_synthetic.py --out out/synthetic
+    python tests/make_synthetic.py --out out/synthetic                      # fixed set
+    python tests/make_synthetic.py --out out/train/images \
+        --labels out/train/labels --random 80 --seed 500                    # training set
 
-Files are named per SPEC 7 so eval.py can score the folder directly.
-Output never goes into data/eval/ - that folder is reserved for real photos.
+Files are named per SPEC 7 so eval.py can score the folder directly. Output never
+goes into data/eval/ - that folder is reserved for real photos.
 """
 
 from __future__ import annotations
@@ -25,6 +28,38 @@ import numpy as np
 BACKGROUND_LEVEL = 238
 CIRCLE_LEVEL_RANGE = (95, 150)
 RIM_LEVEL = 60
+
+
+@dataclass
+class Scene:
+    """A generated stack plus the exact truth behind it."""
+
+    image: np.ndarray
+    circles: list[tuple[float, float, float]]  # x, y, radius - radius varies under tilt
+
+    @property
+    def count(self) -> int:
+        return len(self.circles)
+
+    @property
+    def positions(self) -> list[tuple[float, float]]:
+        return [(x, y) for x, y, _ in self.circles]
+
+    @property
+    def radius(self) -> float:
+        """Median bar radius; the per-circle value is what the labels actually use."""
+        return float(np.median([r for _, _, r in self.circles])) if self.circles else 0.0
+
+    def yolo_lines(self, class_index: int = 0) -> list[str]:
+        """Ground-truth boxes in YOLO format - the labels a human would have drawn."""
+        height, width = self.image.shape[:2]
+        lines = []
+        for x, y, r in self.circles:
+            lines.append(
+                f"{class_index} {x / width:.6f} {y / height:.6f} "
+                f"{2.0 * r / width:.6f} {2.0 * r / height:.6f}"
+            )
+        return lines
 
 
 def hex_positions(
@@ -61,29 +96,99 @@ def radius_for_count(width: int, height: int, count: int, spacing_ratio: float) 
     return radius
 
 
-@dataclass
-class Scene:
-    """A generated stack plus the exact truth behind it."""
+def split_into_bundles(
+    positions: list[tuple[float, float]], bundles: int, height: int, gap_ratio: float
+) -> list[tuple[float, float]]:
+    """Drop horizontal strips so the frame holds several bundles side by side.
 
-    image: np.ndarray
-    positions: list[tuple[float, float]]
-    radius: float
+    SPEC 7 lists "birden fazla demet bir arada" as its own condition: the counter
+    must not treat the gap between two bundles as the edge of the photo.
+    """
+    if bundles <= 1:
+        return positions
+    band = height / bundles
+    gap = band * gap_ratio
+    kept = []
+    for x, y in positions:
+        offset = y % band
+        if gap / 2 <= offset <= band - gap / 2:
+            kept.append((x, y))
+    return kept
 
-    @property
-    def count(self) -> int:
-        return len(self.positions)
 
-    def yolo_lines(self, class_index: int = 0) -> list[str]:
-        """Ground-truth boxes in YOLO format - the labels a human would have drawn."""
-        height, width = self.image.shape[:2]
-        side = 2.0 * self.radius
-        lines = []
-        for x, y in self.positions:
-            lines.append(
-                f"{class_index} {x / width:.6f} {y / height:.6f} "
-                f"{side / width:.6f} {side / height:.6f}"
-            )
-        return lines
+def background_texture(
+    shape: tuple[int, int], amount: float, rng: np.random.Generator
+) -> np.ndarray:
+    """Concrete / truck-bed mottling, not a studio backdrop."""
+    if amount <= 0:
+        return np.zeros(shape, dtype=np.float32)
+    height, width = shape
+    coarse = rng.normal(0.0, 1.0, (max(2, height // 24), max(2, width // 24))).astype(np.float32)
+    coarse = cv2.resize(coarse, (width, height), interpolation=cv2.INTER_CUBIC)
+    fine = rng.normal(0.0, 0.35, shape).astype(np.float32)
+    return (coarse + fine) * amount
+
+
+def add_glare(canvas: np.ndarray, strength: float, rng: np.random.Generator) -> np.ndarray:
+    """A blown-out patch where the sun or the flash hits the cut faces."""
+    if strength <= 0:
+        return canvas
+    height, width = canvas.shape
+    cx = rng.uniform(0.15, 0.85) * width
+    cy = rng.uniform(0.15, 0.85) * height
+    sigma = rng.uniform(0.15, 0.30) * min(width, height)
+    ys, xs = np.mgrid[0:height, 0:width].astype(np.float32)
+    falloff = np.exp(-(((xs - cx) ** 2 + (ys - cy) ** 2) / (2.0 * sigma * sigma)))
+    return canvas + strength * falloff
+
+
+def tilt_homography(width: int, height: int, degrees: float, rng: np.random.Generator):
+    """Homography for looking at the stack end off-axis (SPEC 7: 0, ~10, ~20 degrees)."""
+    if degrees <= 0:
+        return None
+    shrink = math.sin(math.radians(degrees)) * 0.5
+    horizontal = rng.random() < 0.5
+    source = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+    if horizontal:
+        inset = shrink * height
+        target = np.float32(
+            [[0, inset], [width, 0], [width, height], [0, height - inset]]
+        )
+    else:
+        inset = shrink * width
+        target = np.float32(
+            [[inset, 0], [width - inset, 0], [width, height], [0, height]]
+        )
+    return cv2.getPerspectiveTransform(source, target)
+
+
+def apply_tilt(
+    canvas: np.ndarray,
+    circles: list[tuple[float, float, float]],
+    matrix: np.ndarray,
+    fill: float,
+) -> tuple[np.ndarray, list[tuple[float, float, float]]]:
+    """Warp the image and the truth together, then drop what left the frame."""
+    height, width = canvas.shape
+    warped = cv2.warpPerspective(
+        canvas, matrix, (width, height), flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=float(fill),
+    )
+
+    centres = np.float32([[[x, y]] for x, y, _ in circles])
+    right = np.float32([[[x + r, y]] for x, y, r in circles])
+    down = np.float32([[[x, y + r]] for x, y, r in circles])
+    centres = cv2.perspectiveTransform(centres, matrix).reshape(-1, 2)
+    right = cv2.perspectiveTransform(right, matrix).reshape(-1, 2)
+    down = cv2.perspectiveTransform(down, matrix).reshape(-1, 2)
+
+    moved: list[tuple[float, float, float]] = []
+    for (cx, cy), (rx, ry), (dx, dy) in zip(centres, right, down):
+        # Perspective squashes one axis more than the other; average the two.
+        radius = (math.hypot(rx - cx, ry - cy) + math.hypot(dx - cx, dy - cy)) / 2.0
+        if 0 <= cx < width and 0 <= cy < height and radius > 2:
+            moved.append((float(cx), float(cy), float(radius)))
+    return warped, moved
 
 
 def render(
@@ -94,6 +199,11 @@ def render(
     noise_sigma: float = 3.0,
     gradient: float = 0.0,
     drop_fraction: float = 0.0,
+    bundles: int = 1,
+    bundle_gap_ratio: float = 0.22,
+    tilt_degrees: float = 0.0,
+    background_amount: float = 0.0,
+    glare: float = 0.0,
     size: tuple[int, int] = (1200, 900),
     seed: int = 0,
 ) -> Scene:
@@ -109,12 +219,14 @@ def render(
     jitter = radius * jitter_ratio
 
     positions = hex_positions(width, height, radius, spacing_ratio, margin)
+    positions = split_into_bundles(positions, bundles, height, bundle_gap_ratio)
     if drop_fraction > 0 and positions:
         keep = rng.random(len(positions)) >= drop_fraction
         positions = [p for p, k in zip(positions, keep) if k]
     positions = positions[:count]
 
-    canvas = np.full((height, width), BACKGROUND_LEVEL, dtype=np.float32)
+    canvas = np.full((height, width), float(BACKGROUND_LEVEL), dtype=np.float32)
+    canvas += background_texture((height, width), background_amount, rng)
     if gradient:
         ramp = np.linspace(-gradient, gradient, width, dtype=np.float32)
         canvas += ramp[None, :]
@@ -140,12 +252,18 @@ def render(
                 cv2.LINE_AA,
             )
 
+    circles = [(x, y, radius) for x, y in jittered]
+    matrix = tilt_homography(width, height, tilt_degrees, rng)
+    if matrix is not None:
+        canvas, circles = apply_tilt(canvas, circles, matrix, BACKGROUND_LEVEL)
+
     canvas = cv2.GaussianBlur(canvas, (3, 3), 0)
+    canvas = add_glare(canvas, glare, rng)
     if noise_sigma > 0:
         canvas += rng.normal(0.0, noise_sigma, canvas.shape).astype(np.float32)
 
     image = np.clip(canvas, 0, 255).astype(np.uint8)
-    return Scene(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), jittered, radius)
+    return Scene(cv2.cvtColor(image, cv2.COLOR_GRAY2BGR), circles)
 
 
 # name -> render kwargs. Each variant isolates one thing that can break the pipeline.
@@ -158,6 +276,17 @@ VARIANTS = {
     "gradyan": dict(count=180, spacing_ratio=1.02, gradient=55.0),
     "duzensiz": dict(count=300, spacing_ratio=1.02, drop_fraction=0.22, jitter_ratio=0.12),
     "kalabalik": dict(count=420, spacing_ratio=1.02),
+    # SPEC 7 diversity matrix beyond packing and light:
+    "egik10": dict(count=240, spacing_ratio=1.02, tilt_degrees=10.0),
+    "egik20": dict(count=240, spacing_ratio=1.02, tilt_degrees=20.0),
+    "zeminli": dict(count=240, spacing_ratio=1.02, background_amount=14.0, drop_fraction=0.10),
+    "parlama": dict(count=240, spacing_ratio=1.02, glare=70.0),
+    "cift-demet": dict(count=300, spacing_ratio=1.02, bundles=2),
+    "uc-demet": dict(count=300, spacing_ratio=1.02, bundles=3, bundle_gap_ratio=0.26),
+    "zor": dict(
+        count=360, spacing_ratio=1.00, tilt_degrees=14.0, background_amount=10.0,
+        glare=45.0, noise_sigma=7.0, gradient=35.0, rim_ratio=0.06, jitter_ratio=0.09,
+    ),
 }
 
 
@@ -182,6 +311,10 @@ def random_scene(rng: np.random.Generator, seed: int) -> tuple[str, Scene]:
     kwargs["gradient"] = float(rng.uniform(0.0, 60.0))
     kwargs["jitter_ratio"] = float(rng.uniform(0.02, 0.14))
     kwargs["rim_ratio"] = float(rng.uniform(0.0, 0.16))
+    kwargs["tilt_degrees"] = float(rng.choice([0.0, 0.0, 6.0, 10.0, 14.0, 20.0]))
+    kwargs["background_amount"] = float(rng.uniform(0.0, 16.0))
+    kwargs["glare"] = float(rng.choice([0.0, 0.0, 30.0, 55.0, 80.0]))
+    kwargs["bundles"] = int(rng.choice([1, 1, 1, 2, 3]))
     width = int(rng.choice([1000, 1200, 1400, 1600]))
     kwargs["size"] = (width, int(width * rng.uniform(0.68, 0.82)))
     return name, render(seed=seed, **kwargs)
@@ -210,7 +343,10 @@ def main(argv: list[str] | None = None) -> int:
         rng = np.random.default_rng(args.seed)
         scenes = [random_scene(rng, args.seed + i) for i in range(args.random)]
     else:
-        scenes = [(name, render(seed=args.seed + i, **kw)) for i, (name, kw) in enumerate(VARIANTS.items())]
+        scenes = [
+            (name, render(seed=args.seed + i, **kw))
+            for i, (name, kw) in enumerate(VARIANTS.items())
+        ]
 
     for index, (name, scene) in enumerate(scenes):
         # SPEC 7 filename: YYYYMMDD_hhmm_<truecount>_<diameter>_<condition>

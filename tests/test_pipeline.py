@@ -122,6 +122,88 @@ def test_radius_estimate_ignores_debris(cfg):
     assert detect.estimate_radius(bars + debris, cfg) == pytest.approx(20.0, abs=1.0)
 
 
+def test_intensity_filter_drops_background_gaps(cfg):
+    """A gap between sparse bars can be bar-sized and bar-shaped; it is not bar-coloured."""
+    bars = [
+        detect.Detection(
+            x=float(i * 40), y=0.0, r=20.0, area=1256.0,
+            circularity=0.9, fill_ratio=0.9, mean_intensity=120.0 + (i % 5),
+        )
+        for i in range(30)
+    ]
+    background = detect.Detection(
+        x=5.0, y=60.0, r=19.0, area=1130.0,
+        circularity=0.85, fill_ratio=0.85, mean_intensity=238.0,
+    )
+
+    kept = detect.filter_intensity_outliers(bars + [background], cfg)
+    assert len(kept) == len(bars)
+    assert background not in kept
+
+
+def test_intensity_filter_keeps_rusty_and_shiny_bars_together(cfg):
+    """Bars vary a lot in shade; only the clear outliers may go."""
+    bars = [
+        detect.Detection(
+            x=float(i * 40), y=0.0, r=20.0, area=1256.0,
+            circularity=0.9, fill_ratio=0.9, mean_intensity=float(level),
+        )
+        # A rusty-to-shiny spread as wide as the synthetic generator produces.
+        for i, level in enumerate(range(95, 155, 2))
+    ]
+    assert len(detect.filter_intensity_outliers(bars, cfg)) == len(bars)
+
+
+def test_intensity_filter_is_a_no_op_on_a_handful_of_detections(cfg):
+    """With too few blobs the median and MAD mean nothing, so nothing is rejected."""
+    few = [
+        detect.Detection(
+            x=float(i), y=0.0, r=20.0, area=1256.0,
+            circularity=0.9, fill_ratio=0.9, mean_intensity=120.0 if i else 240.0,
+        )
+        for i in range(4)
+    ]
+    assert len(detect.filter_intensity_outliers(few, cfg)) == 4
+
+
+def test_tilted_photo_is_still_counted(tmp_path, cfg):
+    """SPEC 7 requires 0, ~10 and ~20 degree tilts to work."""
+    path, truth = _write(tmp_path, "egik20", **VARIANTS["egik20"])
+    result = count_image(path, cfg)
+    error_pct = 100.0 * abs(result["count"] - truth) / truth
+    assert error_pct <= MAX_ERROR_PCT, f"tilted: got {result['count']}, expected {truth}"
+
+
+@pytest.mark.parametrize("variant", ["egik20", "zor"])
+def test_hard_variants_are_stable_across_scenes(tmp_path, cfg, variant):
+    """One lucky scene is not evidence. Sweep seeds and check the WORST case.
+
+    This test exists because a single-seed check reported 0% error on a 20-degree
+    stack while other scenes of the same variant were losing a fifth of the bars:
+    the radius estimate was landing on the wrong scale and the area filter was
+    throwing the real bars away.
+    """
+    errors = []
+    for seed in (0, 3, 7, 11, 42, 100):
+        scene = render(seed=seed, **VARIANTS[variant])
+        path = tmp_path / f"20260101_1200_{scene.count}_12_{variant}{seed}.png"
+        write_image(path, scene.image)
+        predicted = count_image(path, cfg)["count"]
+        errors.append(100.0 * abs(predicted - scene.count) / scene.count)
+
+    worst = max(errors)
+    mean = sum(errors) / len(errors)
+    assert worst <= 3 * MAX_ERROR_PCT, f"{variant}: worst scene off by {worst:.1f}%"
+    assert mean <= MAX_ERROR_PCT, f"{variant}: mean error {mean:.1f}%"
+
+
+def test_two_bundles_in_one_frame(tmp_path, cfg):
+    """The gap between two bundles must not be read as the edge of the stack."""
+    path, truth = _write(tmp_path, "cift-demet", **VARIANTS["cift-demet"])
+    result = count_image(path, cfg)
+    assert 100.0 * abs(result["count"] - truth) / truth <= MAX_ERROR_PCT
+
+
 def test_split_separates_two_touching_discs(cfg):
     """The one step the whole approach depends on, isolated."""
     canvas = np.zeros((120, 200), np.uint8)

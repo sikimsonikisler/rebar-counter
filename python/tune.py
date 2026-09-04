@@ -42,6 +42,12 @@ SEARCH_SPACE: dict[str, list] = {
     "detect.shape.min_fill_ratio": [0.4, 0.55, 0.7],
     "detect.relative.min_area_ratio": [0.2, 0.3, 0.45, 0.6],
     "detect.relative.max_area_ratio": [1.6, 2.0, 2.6],
+    # A tilted photo makes the far bars smaller and squashes them into ellipses, so
+    # the size window and the roundness bar both have to be loose enough to survive
+    # perspective without letting the background in.
+    "detect.radius_outlier.low_ratio": [0.45, 0.55, 0.60, 0.70],
+    "detect.radius_outlier.high_ratio": [1.40, 1.60, 1.90],
+    "detect.intensity_outlier.mad_threshold": [2.0, 2.5, 3.0, 3.5, 5.0],
     "detect.merge_distance_ratio": [0.0, 0.35, 0.55, 0.8],
 }
 

@@ -19,16 +19,21 @@ class Detection:
     area: float
     circularity: float
     fill_ratio: float
+    mean_intensity: float = 0.0
 
     def as_point(self) -> list[float]:
         return [round(self.x, 1), round(self.y, 1), round(self.r, 1)]
 
 
-def extract_candidates(separated: np.ndarray, cfg: dict) -> list[Detection]:
-    """One Detection per connected blob, with the shape metrics needed for filtering.
+def extract_candidates(
+    separated: np.ndarray, cfg: dict, gray: np.ndarray | None = None
+) -> list[Detection]:
+    """One Detection per connected blob, with the metrics needed for filtering.
 
     Blobs outside the absolute area guards are dropped here so the (more expensive)
-    contour work never runs on obvious noise.
+    contour work never runs on obvious noise. When `gray` is given, each blob also
+    carries its mean brightness, which is what separates a bar from a patch of
+    background that happens to be the right size.
     """
     absolute_cfg = cfg["detect"]["absolute"]
     min_area = float(absolute_cfg["min_area_px"])
@@ -58,6 +63,11 @@ def extract_candidates(separated: np.ndarray, cfg: dict) -> list[Detection]:
         _, enclosing_radius = cv2.minEnclosingCircle(contour)
         fill_ratio = area / (math.pi * enclosing_radius**2) if enclosing_radius > 0 else 0.0
 
+        mean_intensity = 0.0
+        if gray is not None:
+            window = gray[top : top + height, left : left + width]
+            mean_intensity = float(window[blob > 0].mean()) if area > 0 else 0.0
+
         detections.append(
             Detection(
                 x=float(centroids[index][0]),
@@ -66,6 +76,7 @@ def extract_candidates(separated: np.ndarray, cfg: dict) -> list[Detection]:
                 area=area,
                 circularity=circularity,
                 fill_ratio=min(fill_ratio, 1.0),
+                mean_intensity=mean_intensity,
             )
         )
     return detections
@@ -86,26 +97,40 @@ def filter_by_shape(detections: list[Detection], cfg: dict) -> list[Detection]:
 def estimate_radius(detections: list[Detection], cfg: dict) -> float | None:
     """The automatic scale estimate (SPEC 4): how big is one bar in this photo?
 
-    The default is the area-weighted mode rather than a plain median. Bars carry
-    almost all of the foreground area while noise fragments are numerous but tiny,
-    so the mode survives a messy first pass where a median gets dragged down to the
-    size of the debris. Returns None when there is not enough to estimate from.
+    Weighted by area, because bars carry nearly all of the foreground while noise
+    fragments are numerous but tiny - a plain median gets dragged down to the size
+    of the debris. The default takes the *median* of that weighted distribution
+    rather than the mode of a histogram: a tilted photo spreads the radii across a
+    wide range, and a mode over bins can then land on the wrong bin entirely, which
+    is exactly how a 20-degree stack loses a third of its bars to the area filter.
+    Returns None when there is not enough to estimate from.
     """
     estimate_cfg = cfg["detect"]["radius_estimate"]
     if len(detections) < int(estimate_cfg["min_detections"]):
         return None
 
     radii = np.array([d.r for d in detections], dtype=np.float64)
-    if estimate_cfg["method"] == "median":
+    method = estimate_cfg["method"]
+    if method == "median":
         return float(np.median(radii))
 
     areas = np.array([d.area for d in detections], dtype=np.float64)
-    histogram, edges = np.histogram(
-        radii, bins=int(estimate_cfg["histogram_bins"]), weights=areas
-    )
-    peak = int(np.argmax(histogram))
-    in_peak = radii[(radii >= edges[peak]) & (radii <= edges[peak + 1])]
-    return float(np.median(in_peak)) if in_peak.size else float(np.median(radii))
+    if method == "area_weighted_mode":
+        histogram, edges = np.histogram(
+            radii, bins=int(estimate_cfg["histogram_bins"]), weights=areas
+        )
+        peak = int(np.argmax(histogram))
+        in_peak = radii[(radii >= edges[peak]) & (radii <= edges[peak + 1])]
+        return float(np.median(in_peak)) if in_peak.size else float(np.median(radii))
+
+    # area_weighted_median: the radius at which half the total foreground area is
+    # accounted for. No bins, so nothing to land in the wrong one.
+    order = np.argsort(radii)
+    cumulative = np.cumsum(areas[order])
+    if cumulative[-1] <= 0:
+        return float(np.median(radii))
+    half = np.searchsorted(cumulative, cumulative[-1] / 2.0)
+    return float(radii[order][min(half, len(radii) - 1)])
 
 
 def filter_by_relative_area(
@@ -129,6 +154,32 @@ def filter_radius_outliers(
     low = float(outlier_cfg["low_ratio"]) * radius
     high = float(outlier_cfg["high_ratio"]) * radius
     return [d for d in detections if low <= d.r <= high]
+
+
+def filter_intensity_outliers(detections: list[Detection], cfg: dict) -> list[Detection]:
+    """Drop blobs whose brightness does not belong to the bar population.
+
+    Once the shape gates are loose enough to accept the ellipses a tilted photo
+    produces, they also accept the triangular gaps between sparsely packed bars.
+    Those gaps are background, and background is a different shade from steel -
+    so the rejection moves from shape to brightness. Median + MAD rather than
+    mean + sigma, because a handful of very bright gaps would drag a mean along
+    with them.
+    """
+    intensity_cfg = cfg["detect"]["intensity_outlier"]
+    if not intensity_cfg["enabled"] or len(detections) < int(intensity_cfg["min_detections"]):
+        return detections
+
+    values = np.array([d.mean_intensity for d in detections], dtype=np.float64)
+    if not values.any():
+        return detections
+    median = float(np.median(values))
+    deviation = float(np.median(np.abs(values - median)))
+    if deviation <= 0:
+        return detections
+
+    limit = float(intensity_cfg["mad_threshold"]) * deviation
+    return [d for d in detections if abs(d.mean_intensity - median) <= limit]
 
 
 def merge_close(detections: list[Detection], cfg: dict) -> list[Detection]:
@@ -196,6 +247,7 @@ def scale_to_original(detections: list[Detection], factor: float) -> list[Detect
             area=d.area * factor * factor,
             circularity=d.circularity,
             fill_ratio=d.fill_ratio,
+            mean_intensity=d.mean_intensity,
         )
         for d in detections
     ]

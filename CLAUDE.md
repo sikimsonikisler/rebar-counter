@@ -66,19 +66,20 @@ xcodebuild -project ios/RebarCounter/RebarCounter.xcodeproj -scheme RebarCounter
 Bir değişiklikten sonra bunlarla karşılaştır. Hepsi **sentetik** veriden; `data/eval/`
 boş olduğu sürece gerçek kabul kriteri ölçülmemiş sayılır.
 
+Sentetik set 15 varyant: yoğunluk (seyrek/değen/sıkışık/kalabalık), rimsiz,
+gürültü, ışık gradyanı, düzensiz istif, **eğim (10°/20°), zeminli arka plan,
+parlama, çift/üç demet** ve hepsinin birleştiği "zor". SPEC §7 çeşitlilik
+matrisinin renderlanabilir tüm boyutları.
+
 | set | motor | MAPE | MAE | ±2 içinde | süre |
 |---|---|---|---|---|---|
-| `out/synthetic` (ayarın yapıldığı set) | classical | %0.76 | 1.50 | %75 | 57 ms |
-| `out/synthetic_holdout` (`--seed 100`) | classical | %0.30 | 0.75 | %100 | 57 ms |
-| `out/synthetic` | ml | **%0.00** | 0.00 | %100 | 98 ms |
-| `out/synthetic_holdout` | ml | **%0.00** | 0.00 | %100 | 98 ms |
-
-Model: YOLO11n, 80 sentetik fotoğraftan üretilen 425 karo üzerinde 38 epoch
-(patience ile erken durdu). Doğrulama: P 0.992, R 0.997, mAP50 0.995, mAP50-95 0.909.
+| `out/synthetic` (ayarın yapıldığı set) | classical | %0.57 | 1.33 | %73 | ~60 ms |
+| `out/synthetic_holdout` (`--seed 100`) | classical | %0.59 | 1.20 | %73 | ~60 ms |
+| `out/synthetic` | ml | %0.03 | 0.07 | %100 | ~118 ms |
 
 Core ML dönüşümü 20 görüntüde PyTorch ile **birebir aynı sayıyı** veriyor (fark 0).
 Karo başına 2.1 ms → 48 karoluk (4032×3024) bir fotoğraf ~0.10 sn (Mac ölçümü).
-Uygulama paketi 6.9 MB.
+Release paketi 7.3 MB.
 
 ## Kazınmış dersler
 
@@ -109,10 +110,22 @@ Bunlar acıyla öğrenildi, geri alma:
 8. **Yakınlaştırmada dokunma koordinatı.** Dokunma jesti `scaleEffect`'ten ÖNCEKİ
    görünüme bağlanır; böylece konum dönüşmemiş çerçevede gelir ve tek bir bölmeyle
    piksele çevrilir. Ters matris hesabına gerek yok.
+9. **Ölçek tahmini histogram moduyla yapılmaz.** Eğik fotoğrafta yarıçaplar geniş
+   bir aralığa yayılıyor ve mod yanlış bölmeye düşüyordu (15.9 vs gerçek 27.6);
+   alan filtresi de gerçek çubukları eliyordu — bir sahnede %20 kayıp.
+   `area_weighted_median` bölmelemeye hiç bağlı değil, en kötü hata %20.4 → %7.1.
+10. **Şekil filtresi eğimde iş görmez, parlaklık görür.** 20° eğim her kesiti elipse
+    çeviriyor; `min_circularity`'yi 0.30'a indirmek zorunludur, ama o zaman seyrek
+    istifteki arka plan boşlukları da geçiyor. `detect.intensity_outlier` bunları
+    medyan + MAD ile eliyor (dev MAPE %2.31 → %1.09).
+11. **Tek tohumla ölçme.** `egik20` bir tohumda %0.0, başka tohumda %20.4 hata
+    veriyordu. `test_hard_variants_are_stable_across_scenes` altı sahneyi tarayıp
+    EN KÖTÜ vakayı kontrol ediyor.
 
 ## Faz durumu
 
 - **Faz 1** — tamam. Klasik CV baseline, `--debug` 9 ara görsel, `eval.py`, `tune.py`.
+  15 varyantlık sentetik sette MAPE %0.57 / %0.59 (kabul kriteri %10).
 - **Faz 2** — araçlar tamam (`prelabel.py`, `ml/dataset.py`), veri bekliyor.
 - **Faz 3** — tamam (sentetik veriyle). `tile.py`, `train.py`, `predict.py`, `--method ml`.
   Kabul kriteri (MAPE ≤ %3, ±2 içinde ≥ %90) geçildi: %0.00 / %100.

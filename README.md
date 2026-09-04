@@ -11,10 +11,10 @@ irsaliye numarasıyla kaydet. Her şey cihazda: sunucu yok, hesap yok, internet 
 
 | Faz | Durum |
 |---|---|
-| 1 — klasik CV baseline | tamam — sentetik sette MAPE %0.76 (dev) / %0.30 (holdout) |
+| 1 — klasik CV baseline | tamam — 15 varyantlık sentetik sette MAPE %0.57 (dev) / %0.59 (holdout) |
 | 2 — ön-etiketleme araçları | tamam, gerçek fotoğraf bekliyor |
-| 3 — YOLO + karolama | tamam — sentetik sette MAPE %0.00, ±2 içinde %100 |
-| 4 — Core ML + iOS | tamam — simülatörde uçtan uca çalışıyor, paket 6.9 MB |
+| 3 — YOLO + karolama | tamam — sentetik sette MAPE %0.03, ±2 içinde %100 |
+| 4 — Core ML + iOS | tamam — simülatörde uçtan uca çalışıyor, release paketi 7.3 MB |
 | 5 — saha testi | ölçüm altyapısı hazır, gerçek kullanıcı bekliyor |
 
 **Bütün doğruluk rakamları sentetik veriden.** `data/eval/` klasörüne SPEC §7

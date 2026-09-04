@@ -20,7 +20,7 @@ preprocess:
     # Edge-preserving denoise: smooths rust speckle without blurring the gap lines.
     enabled: true
     diameter: 9                       # neighbourhood diameter in px (odd, 5-9 sane)
-    sigma_color: 50                   # how different in intensity pixels may be and still mix
+    sigma_color: 80                   # how different in intensity pixels may be and still mix
     sigma_space: 50                   # how far apart in px pixels may be and still mix
 
 segment:
@@ -34,7 +34,7 @@ segment:
     # `keep_percentile` of the image. That excludes dark and bright separators alike
     # and does not care how bright any individual bar happens to be, which is the
     # failure mode that sinks a plain adaptive threshold on rusty-next-to-shiny bars.
-    block_size: 23                    # local-mean window in px (odd)
+    block_size: 9                     # local-mean window in px (odd)
     block_size_radius_ratio: 0.6      # pass 2 window = this x radius (0 = keep block_size)
     keep_percentile: 64               # share of the flattest pixels kept as foreground
 
@@ -84,10 +84,10 @@ segment:
     #   global_ratio- classic dist > ratio * max(dist); simpler, undersegments big blobs
     seed_method: local_max            # local_max | global_ratio
     global_ratio: 0.45                # only used by seed_method: global_ratio
-    initial_peak_kernel: 7            # first-pass peak search window in px (odd)
+    initial_peak_kernel: 5            # first-pass peak search window in px (odd)
     min_peak_distance_px: 2.0         # ignore distance-transform peaks thinner than this
-    peak_kernel_radius_ratio: 1.4     # second pass: peak window = this x estimated radius
-    min_peak_dist_radius_ratio: 0.35  # second pass: peak must be this x radius from an edge
+    peak_kernel_radius_ratio: 1.1     # second pass: peak window = this x estimated radius
+    min_peak_dist_radius_ratio: 0.65  # second pass: peak must be this x radius from an edge
     background_dilate_kernel: 3       # dilation that produces the "sure background" ring
     background_dilate_iterations: 3
 
@@ -99,12 +99,15 @@ segment:
 
 detect:
   radius_estimate:
-    # area_weighted_mode - the radius bin holding the most *area*. Bars carry nearly
-    #                      all the area while noise fragments are many but tiny, so
-    #                      this survives a messy pass 1 where a plain median does not.
-    # median             - median radius of the surviving candidates.
-    method: area_weighted_mode        # area_weighted_mode | median
-    histogram_bins: 40
+    # area_weighted_median - the radius at which half the foreground area is reached.
+    #                        Ignores debris (it carries no area) without binning, so a
+    #                        tilted photo whose bars span a wide range still lands on
+    #                        the right scale.
+    # area_weighted_mode   - the radius bin holding the most area. Same idea, but the
+    #                        bins can straddle a spread-out distribution.
+    # median               - plain median; only safe when pass 1 is already clean.
+    method: area_weighted_median      # area_weighted_median | area_weighted_mode | median
+    histogram_bins: 40                # only used by area_weighted_mode
     min_detections: 8                 # below this the estimate is noise; keep pass 1
 
   # Absolute guards, applied in the first pass when no scale estimate exists yet.
@@ -113,16 +116,28 @@ detect:
     max_area_px: 60000                # anything bigger is background, not a bar
   # Scale-relative guards, applied once the median radius R is known.
   relative:
-    min_area_ratio: 0.30              # min area = ratio * pi * R^2
-    max_area_ratio: 1.60              # max area = ratio * pi * R^2
+    min_area_ratio: 0.20              # min area = ratio * pi * R^2
+    max_area_ratio: 2.00              # max area = ratio * pi * R^2
   shape:
-    min_circularity: 0.45             # 4*pi*A / P^2 ; 1.0 = perfect circle
-    min_fill_ratio: 0.70              # A / (pi * minEnclosingCircle_r^2) ; catches crescents
+    # Loose on purpose. A photo taken at 20 degrees off-axis turns every cut face
+    # into an ellipse, and a strict roundness gate throws away a third of the stack.
+    # The area window and the radius window below carry the rejection work instead.
+    min_circularity: 0.30             # 4*pi*A / P^2 ; 1.0 = perfect circle
+    min_fill_ratio: 0.55              # A / (pi * minEnclosingCircle_r^2) ; catches crescents
   radius_outlier:
-    # SPEC 4: candidates outside +/-40% of the median radius are dropped.
+    # SPEC 4: candidates outside +/-40% of the estimated radius are dropped.
     enabled: true
     low_ratio: 0.60
     high_ratio: 1.40
+  intensity_outlier:
+    # Bars are all the same steel; a gap between them is background. Once the shape
+    # gates are loose enough for a tilted photo they no longer reject those gaps, so
+    # brightness does it instead: drop blobs more than `mad_threshold` median
+    # absolute deviations away from the population median.
+    enabled: true
+    mad_threshold: 3.0
+    min_detections: 12                # below this the median/MAD mean nothing
+
   # Detections whose centres are closer than this x radius are merged (watershed
   # occasionally splits one bar into two slivers).
   merge_distance_ratio: 0.55
