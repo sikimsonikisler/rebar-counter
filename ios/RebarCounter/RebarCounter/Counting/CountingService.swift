@@ -141,45 +141,64 @@ actor CountingService {
         guard shape.count == 3, shape[1] >= 5 else {
             throw CountingError.unsupportedOutput("shape \(shape)")
         }
-        let attributes = shape[1]
-        let anchors = shape[2]
-        let strides = array.strides.map(\.intValue)
+        let layout = Layout(
+            attributes: shape[1],
+            anchors: shape[2],
+            attributeStride: array.strides[1].intValue,
+            anchorStride: array.strides[2].intValue,
+            scaleX: scaleX,
+            scaleY: scaleY
+        )
 
-        // A float16-quantised export can hand back a float16 output; reading it as
-        // Float would be garbage rather than an error, so the type is checked here.
-        let read: (Int) -> Double
+        // A float16-quantised export can hand back a float16 output; reading that as
+        // Float would be garbage rather than an error, so the type decides the reader.
         switch array.dataType {
         case .float32:
-            let base = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
-            read = { Double(base[$0]) }
+            return array.withUnsafeBufferPointer(ofType: Float.self) { buffer in
+                boxes(layout) { Double(buffer[$0]) }
+            }
         case .float16:
-            let base = array.dataPointer.bindMemory(to: Float16.self, capacity: array.count)
-            read = { Double(base[$0]) }
+            return array.withUnsafeBufferPointer(ofType: Float16.self) { buffer in
+                boxes(layout) { Double(buffer[$0]) }
+            }
         case .double:
-            let base = array.dataPointer.bindMemory(to: Double.self, capacity: array.count)
-            read = { base[$0] }
+            return array.withUnsafeBufferPointer(ofType: Double.self) { buffer in
+                boxes(layout) { buffer[$0] }
+            }
         default:
             throw CountingError.unsupportedOutput("dtype \(array.dataType.rawValue)")
         }
+    }
 
+    /// Everything decodeRaw needs that does not depend on the element type.
+    private struct Layout {
+        let attributes: Int
+        let anchors: Int
+        let attributeStride: Int
+        let anchorStride: Int
+        let scaleX: CGFloat
+        let scaleY: CGFloat
+    }
+
+    private func boxes(_ layout: Layout, read: (Int) -> Double) -> [Tiler.Box] {
         func value(_ attribute: Int, _ anchor: Int) -> Double {
-            read(attribute * strides[1] + anchor * strides[2])
+            read(attribute * layout.attributeStride + anchor * layout.anchorStride)
         }
 
         // Ultralytics emits box coordinates in input pixels; some exports normalise
         // them to 0...1. Decide once from the centres, which span the whole tile in
-        // pixel mode and can never all be under 1.5 there.
+        // pixel mode and so can never all sit under 1.5 there.
         var maximum = 0.0
-        for anchor in stride(from: 0, to: anchors, by: Swift.max(1, anchors / 128)) {
+        for anchor in stride(from: 0, to: layout.anchors, by: Swift.max(1, layout.anchors / 128)) {
             maximum = Swift.max(maximum, Swift.max(value(0, anchor), value(1, anchor)))
         }
         let unit = maximum <= 1.5 ? Double(inputSize.width) : 1.0
 
-        var boxes: [Tiler.Box] = []
-        boxes.reserveCapacity(256)
-        for anchor in 0..<anchors {
+        var found: [Tiler.Box] = []
+        found.reserveCapacity(256)
+        for anchor in 0..<layout.anchors {
             var score = value(4, anchor)
-            for attribute in 5..<attributes {
+            for attribute in 5..<layout.attributes {
                 score = Swift.max(score, value(attribute, anchor))
             }
             guard score >= config.scoreThreshold else { continue }
@@ -188,19 +207,19 @@ actor CountingService {
             let cy = value(1, anchor) * unit
             let w = value(2, anchor) * unit
             let h = value(3, anchor) * unit
-            boxes.append(
+            found.append(
                 Tiler.Box(
                     rect: CGRect(
-                        x: (cx - w / 2) * scaleX,
-                        y: (cy - h / 2) * scaleY,
-                        width: w * scaleX,
-                        height: h * scaleY
+                        x: (cx - w / 2) * layout.scaleX,
+                        y: (cy - h / 2) * layout.scaleY,
+                        width: w * layout.scaleX,
+                        height: h * layout.scaleY
                     ),
                     score: score
                 )
             )
         }
-        return boxes
+        return found
     }
 
     private func decodePipeline(

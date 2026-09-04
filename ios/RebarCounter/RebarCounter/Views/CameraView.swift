@@ -12,10 +12,13 @@ struct CameraView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            if camera.isAuthorised {
+            if camera.isAuthorised, camera.hasCamera {
                 CameraPreview(session: camera.session)
                     .ignoresSafeArea()
                 GuideFrame()
+            } else if camera.isAuthorised {
+                // The simulator has no camera; say so instead of showing a black screen.
+                MissingCameraNotice()
             } else {
                 PermissionNotice(state: camera.authorisationState) { camera.requestAccess() }
             }
@@ -28,24 +31,28 @@ struct CameraView: View {
                     Spacer()
                 }
                 Spacer()
-                Text("İstifin ucu çerçeveye sığsın, mümkün olduğunca dik çek")
-                    .font(.callout)
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
-                    .padding(.bottom, 12)
-                    .shadow(radius: 4)
+                // The framing hint and the shutter only make sense when there is a
+                // live preview behind them.
+                if camera.isAuthorised, camera.hasCamera {
+                    Text("İstifin ucu çerçeveye sığsın, mümkün olduğunca dik çek")
+                        .font(.callout)
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                        .padding(.bottom, 12)
+                        .shadow(radius: 4)
 
-                Button {
-                    camera.capture()
-                } label: {
-                    ZStack {
-                        Circle().fill(.white).frame(width: 74, height: 74)
-                        Circle().stroke(.white.opacity(0.6), lineWidth: 4).frame(width: 88, height: 88)
+                    Button {
+                        camera.capture()
+                    } label: {
+                        ZStack {
+                            Circle().fill(.white).frame(width: 74, height: 74)
+                            Circle().stroke(.white.opacity(0.6), lineWidth: 4).frame(width: 88, height: 88)
+                        }
                     }
+                    .disabled(camera.isCapturing)
+                    .padding(.bottom, 28)
                 }
-                .disabled(!camera.isAuthorised || camera.isCapturing)
-                .padding(.bottom, 28)
             }
         }
         .task { await camera.start() }
@@ -73,6 +80,23 @@ private struct GuideFrame: View {
             .stroke(.white.opacity(0.85), style: StrokeStyle(lineWidth: 2, dash: [10, 8]))
         }
         .allowsHitTesting(false)
+    }
+}
+
+private struct MissingCameraNotice: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "camera.badge.ellipsis")
+                .font(.system(size: 44))
+                .foregroundStyle(.white)
+            Text("Bu cihazda kamera yok.")
+                .foregroundStyle(.white)
+            Text("Ana ekrandaki galeri düğmesinden bir fotoğraf seçebilirsin.")
+                .font(.footnote)
+                .foregroundStyle(.white.opacity(0.75))
+                .multilineTextAlignment(.center)
+        }
+        .padding(32)
     }
 }
 
@@ -129,6 +153,7 @@ final class CameraController: NSObject, ObservableObject {
     @Published var capturedImage: UIImage?
     @Published var isCapturing = false
     @Published var authorisationState: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .video)
+    @Published var hasCamera = true
 
     let session = AVCaptureSession()
     private let output = AVCapturePhotoOutput()
@@ -169,6 +194,8 @@ final class CameraController: NSObject, ObservableObject {
            let input = try? AVCaptureDeviceInput(device: device),
            session.canAddInput(input) {
             session.addInput(input)
+        } else {
+            hasCamera = false
         }
         if session.canAddOutput(output) {
             session.addOutput(output)
