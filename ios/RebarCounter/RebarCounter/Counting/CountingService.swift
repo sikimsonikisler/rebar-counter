@@ -67,8 +67,13 @@ actor CountingService {
     /// Count one photo. `progress` is called with 0...1 so a 40-tile photo does not
     /// look frozen.
     func count(image: UIImage, progress: (@Sendable (Double) -> Void)? = nil) async throws -> [Detection] {
-        guard let cgImage = image.cgImage else { throw CountingError.badImage }
+        guard let source = image.cgImage else { throw CountingError.badImage }
         let model = try loadModelIfNeeded()
+
+        // Tiling exists so the model sees bars at native size, but past a point extra
+        // megapixels only buy extra tiles: a 48 MP frame is 187 tiles where a 12 MP one
+        // is 48, and a bar is still tens of pixels across after the downscale.
+        let (cgImage, scaleBack) = Self.fitForTiling(source, limit: config.maxLongEdge)
 
         let width = cgImage.width
         let height = cgImage.height
@@ -100,7 +105,33 @@ actor CountingService {
             progress?(Double(index + 1) / Double(max(tiles.count, 1)))
         }
 
-        return Tiler.detections(from: Tiler.nms(merged, iouThreshold: config.iouThreshold))
+        let detections = Tiler.detections(from: Tiler.nms(merged, iouThreshold: config.iouThreshold))
+        guard scaleBack != 1 else { return detections }
+        return detections.map {
+            Detection(x: $0.x * scaleBack, y: $0.y * scaleBack, radius: $0.radius * scaleBack)
+        }
+    }
+
+    /// Returns the image to tile and the factor that maps its pixels back to the original.
+    static func fitForTiling(_ image: CGImage, limit: Int) -> (CGImage, Double) {
+        let longEdge = Swift.max(image.width, image.height)
+        guard limit > 0, longEdge > limit else { return (image, 1) }
+
+        let ratio = Double(limit) / Double(longEdge)
+        let width = Int((Double(image.width) * ratio).rounded())
+        let height = Int((Double(image.height) * ratio).rounded())
+        guard
+            let context = CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+                    | CGBitmapInfo.byteOrder32Little.rawValue
+            )
+        else { return (image, 1) }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let scaled = context.makeImage() else { return (image, 1) }
+        return (scaled, 1.0 / ratio)
     }
 
     /// Synchronous prediction in a non-async context.

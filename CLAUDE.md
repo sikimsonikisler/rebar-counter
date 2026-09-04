@@ -75,11 +75,18 @@ matrisinin renderlanabilir tüm boyutları.
 |---|---|---|---|---|---|
 | `out/synthetic` (ayarın yapıldığı set) | classical | %0.57 | 1.33 | %73 | ~60 ms |
 | `out/synthetic_holdout` (`--seed 100`) | classical | %0.59 | 1.20 | %73 | ~60 ms |
-| `out/synthetic` | ml | %0.03 | 0.07 | %100 | ~118 ms |
+| `out/synthetic` | ml | **%0.00** | 0.00 | %100 | ~122 ms |
+| `out/synthetic_holdout` | ml | **%0.00** | 0.00 | %100 | ~123 ms |
+
+Model: YOLO11n, 120 sentetik fotoğraftan üretilen 653 karo üzerinde 59 epoch.
+Doğrulama: P 0.990, R 0.992, mAP50 0.995, mAP50-95 0.929. 30 test fotoğrafının
+30'unda tam isabet.
 
 Core ML dönüşümü 20 görüntüde PyTorch ile **birebir aynı sayıyı** veriyor (fark 0).
-Karo başına 2.1 ms → 48 karoluk (4032×3024) bir fotoğraf ~0.10 sn (Mac ölçümü).
-Release paketi 7.3 MB.
+fp32 ile; fp16 nicemlemesi bir fotoğrafta 304 yerine 302 veriyordu (eşik sınırındaki
+tespit) — bkz. `ml.export.quantize_float16`. Karo başına 5.4 ms → 48 karoluk
+(4032×3024) bir fotoğraf ~0.26 sn (Mac ölçümü). Model 10 MB, release paketi 12 MB
+(hedef <100 MB). Gerçek cihazda ölçülmedi — simülatör Neural Engine kullanmıyor.
 
 ## Kazınmış dersler
 
@@ -121,6 +128,13 @@ Bunlar acıyla öğrenildi, geri alma:
 11. **Tek tohumla ölçme.** `egik20` bir tohumda %0.0, başka tohumda %20.4 hata
     veriyordu. `test_hard_variants_are_stable_across_scenes` altı sahneyi tarayıp
     EN KÖTÜ vakayı kontrol ediyor.
+12. **fp16 nicemlemesi eşik sınırındaki tespitleri kaydırır.** 20 görüntülük
+    doğrulamada bir fotoğrafta PyTorch 302, fp16 Core ML 304 dedi. Fark 5000
+    tespitte 2 kutu ama SPEC §6 Faz 4 "fark 0" istiyor ve 10 MB, 100 MB
+    bütçesinin yanında hiçbir şey — varsayılan fp32.
+13. **Karolama öncesi üst sınır.** 48 MP bir kare 187 karo eder; 12 MP'de zaten
+    48 karo var ve çubuklar hâlâ onlarca piksel. `ml.tiling.max_long_edge` ikisini
+    de 4032'ye indiriyor, tespitler orijinal piksellere geri ölçekleniyor.
 
 ## Faz durumu
 

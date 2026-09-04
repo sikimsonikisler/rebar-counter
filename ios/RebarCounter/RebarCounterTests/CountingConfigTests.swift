@@ -19,6 +19,7 @@ struct CountingConfigTests {
         let json = """
         {
           "tileSize": 512,
+          "maxLongEdge": 3000,
           "overlap": 0.25,
           "edgeMarginRatio": 0.10,
           "iouThreshold": 0.4,
@@ -29,7 +30,31 @@ struct CountingConfigTests {
         """
         let config = try JSONDecoder().decode(CountingConfig.self, from: Data(json.utf8))
         #expect(config.tileSize == 512)
+        #expect(config.maxLongEdge == 3000)
         #expect(config.maxDetectionsPerTile == 900)
+    }
+
+    @Test("A file written before a setting existed still decodes")
+    func missingKeysFallBackIndividually() throws {
+        // Swift's synthesised Decodable would reject this whole file for the one
+        // missing key, and the app would quietly ignore the values that ARE there.
+        let json = """
+        { "tileSize": 512, "scoreThreshold": 0.4 }
+        """
+        let config = try JSONDecoder().decode(CountingConfig.self, from: Data(json.utf8))
+        #expect(config.tileSize == 512)          // honoured
+        #expect(config.scoreThreshold == 0.4)    // honoured
+        #expect(config.maxLongEdge == 4032)      // defaulted, not fatal
+        #expect(config.modelName == "RebarDetector")
+    }
+
+    @Test("An unknown future setting does not break an older build")
+    func unknownKeysAreIgnored() throws {
+        let json = """
+        { "tileSize": 512, "somethingAddedLater": 7 }
+        """
+        let config = try JSONDecoder().decode(CountingConfig.self, from: Data(json.utf8))
+        #expect(config.tileSize == 512)
     }
 }
 

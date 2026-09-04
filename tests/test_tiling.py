@@ -118,6 +118,32 @@ def test_run_tiled_maps_back_to_global_coordinates(cfg):
     assert all(0 <= x <= 1800 and 0 <= y <= 1400 for x, y, _ in points)
 
 
+def test_oversized_photos_are_capped_before_tiling(cfg):
+    """A 48 MP frame must not turn into 187 tiles when 48 already see the bars."""
+    from ml.predict import _fit_for_tiling
+
+    cfg["ml"]["tiling"]["max_long_edge"] = 4032
+    huge = np.zeros((6048, 8064, 3), np.uint8)
+    fitted, scale_back = _fit_for_tiling(huge, cfg)
+
+    assert max(fitted.shape[:2]) == 4032
+    assert scale_back == pytest.approx(2.0)
+    # And the tile count drops with it.
+    assert len(tiling.plan_tiles(fitted.shape[1], fitted.shape[0], cfg)) < len(
+        tiling.plan_tiles(8064, 6048, cfg)
+    )
+
+
+def test_photos_within_the_cap_are_left_alone(cfg):
+    from ml.predict import _fit_for_tiling
+
+    cfg["ml"]["tiling"]["max_long_edge"] = 4032
+    normal = np.zeros((3024, 4032, 3), np.uint8)
+    fitted, scale_back = _fit_for_tiling(normal, cfg)
+    assert fitted is normal
+    assert scale_back == 1.0
+
+
 def test_boxes_to_points_matches_the_count_contract():
     boxes = np.array([[10, 20, 30, 40]], dtype=np.float64)
     assert tiling.boxes_to_points(boxes) == [[20.0, 30.0, 10.0]]

@@ -62,6 +62,7 @@ def write_counting_config(cfg: dict, out_dir: Path) -> Path:
     nms_cfg = cfg["ml"]["nms"]
     payload = {
         "tileSize": int(tiling_cfg["tile_size"]),
+        "maxLongEdge": int(tiling_cfg["max_long_edge"]),
         "overlap": float(tiling_cfg["overlap"]),
         "edgeMarginRatio": float(tiling_cfg["edge_margin_ratio"]),
         "iouThreshold": float(nms_cfg["iou_threshold"]),

@@ -3,8 +3,8 @@
 # Lengths are in pixels of the *processing* image (see io.max_long_edge).
 
 io:
-  # Long edge the image is resized to before processing. Smaller = faster but
-  # cross-sections get tiny and watershed starts merging them. 0 = no resize.
+  # Long edge the image is resized to before processing. Smaller = faster, but the
+  # cross-sections shrink with it and start merging into one blob. 0 = no resize.
   max_long_edge: 1600
   # Interpolation used when downscaling (area averaging keeps edges clean).
   resize_interpolation: area          # area | linear | cubic
@@ -88,7 +88,7 @@ segment:
     min_peak_distance_px: 2.0         # ignore distance-transform peaks thinner than this
     peak_kernel_radius_ratio: 1.1     # second pass: peak window = this x estimated radius
     min_peak_dist_radius_ratio: 0.65  # second pass: peak must be this x radius from an edge
-    background_dilate_kernel: 3       # dilation that produces the "sure background" ring
+    background_dilate_kernel: 3       # watershed branch only: the "sure background" ring
     background_dilate_iterations: 3
 
   two_pass:
@@ -114,7 +114,7 @@ detect:
   absolute:
     min_area_px: 30                   # anything smaller is dirt/noise
     max_area_px: 60000                # anything bigger is background, not a bar
-  # Scale-relative guards, applied once the median radius R is known.
+  # Scale-relative guards, applied once the estimated bar radius R is known.
   relative:
     min_area_ratio: 0.20              # min area = ratio * pi * R^2
     max_area_ratio: 2.00              # max area = ratio * pi * R^2
@@ -187,6 +187,10 @@ ml:
     # into global coordinates (the SAHI idea, written out by hand here).
     tile_size: 640                    # square tile side in px
     overlap: 0.20                     # neighbouring tiles share this fraction of a side
+    # Upper bound on the photo before tiling. A 12 MP iPhone frame is 4032 px and
+    # makes 48 tiles; a 48 MP one would make 187 and blow the 1.5 s budget for no
+    # gain, because a bar is still tens of pixels across after the downscale.
+    max_long_edge: 4032
     min_tiles: 1                      # never produce fewer than this many tiles per axis
     edge_margin_ratio: 0.10           # drop detections this close to a tile edge unless
                                       # the edge is also the image edge (they are cut off)
@@ -225,9 +229,13 @@ ml:
   weights: runs/rebar/weights/best.pt
 
   export:
-    # float16 weights: half the file, no measurable loss. Passed to ultralytics as
+    # float16 halves the file (10 MB -> 5 MB) and roughly doubles the speed, but it
+    # moves detections that sit right on the confidence threshold: on one of the 20
+    # verification photos the fp16 model and PyTorch disagreed by 2 bars out of 304.
+    # SPEC 6 phase 4 asks for a count difference of exactly 0, and 10 MB is nowhere
+    # near the 100 MB budget, so fp32 is the default. Passed to ultralytics as
     # `quantize=16`; the older `half=True` flag breaks the Detect head conversion.
-    quantize_float16: true
+    quantize_float16: false
     compare_images: 20                # Python vs Core ML agreement check after export
 
 eval:

@@ -19,6 +19,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import cv2  # noqa: E402
+
 from count import REPO_ROOT, load_config  # noqa: E402
 from ml import tile as tiling  # noqa: E402
 from pipeline import draw, preprocess  # noqa: E402
@@ -89,14 +91,17 @@ def count_image_ml(
 
     started = time.perf_counter()
     original = preprocess.load_image(image_path)
-    # No downscale here: tiling exists precisely so the model sees native pixels.
-    boxes, _ = tiling.run_tiled(original, make_tile_predictor(model, cfg, device), cfg)
-    points = tiling.boxes_to_points(boxes)
+    working, scale_back = _fit_for_tiling(original, cfg)
+    boxes, _ = tiling.run_tiled(working, make_tile_predictor(model, cfg, device), cfg)
+    points = [
+        [round(x * scale_back, 1), round(y * scale_back, 1), round(r * scale_back, 1)]
+        for x, y, r in tiling.boxes_to_points(boxes)
+    ]
     elapsed_ms = (time.perf_counter() - started - debug.io_seconds) * 1000.0
 
     if debug:
-        height, width = original.shape[:2]
-        debug.save("tiles", draw.draw_tiles(original, tiling.plan_tiles(width, height, cfg), cfg))
+        height, width = working.shape[:2]
+        debug.save("tiles", draw.draw_tiles(working, tiling.plan_tiles(width, height, cfg), cfg))
         detections = [
             draw_detection(x, y, r) for x, y, r in points
         ]
@@ -108,6 +113,26 @@ def count_image_ml(
         "method": "ml",
         "elapsed_ms": round(elapsed_ms),
     }
+
+
+def _fit_for_tiling(image: np.ndarray, cfg: dict) -> tuple[np.ndarray, float]:
+    """Cap the photo before tiling. Returns (image, factor back to original pixels).
+
+    Tiling exists so the model sees bars at native size, but past a point extra
+    megapixels only buy extra tiles: a 48 MP frame is 187 tiles where a 12 MP one is
+    48, and the bars were already tens of pixels across in the smaller frame.
+    """
+    limit = int(cfg["ml"]["tiling"]["max_long_edge"])
+    height, width = image.shape[:2]
+    long_edge = max(height, width)
+    if limit <= 0 or long_edge <= limit:
+        return image, 1.0
+
+    ratio = limit / float(long_edge)
+    resized = cv2.resize(
+        image, (int(round(width * ratio)), int(round(height * ratio))), interpolation=cv2.INTER_AREA
+    )
+    return resized, 1.0 / ratio
 
 
 def draw_detection(x: float, y: float, r: float):

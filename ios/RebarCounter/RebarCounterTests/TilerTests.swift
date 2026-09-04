@@ -149,6 +149,30 @@ struct TilerTests {
         #expect(global.origin == CGPoint(x: 1034, y: 532))
     }
 
+    @Test("An oversized photo is capped before tiling, and the factor maps back")
+    func oversizedPhotosAreCapped() throws {
+        // 48 MP: 187 tiles uncapped, and a bar is still tens of pixels across at half size.
+        let huge = try #require(makeImage(width: 8064, height: 6048))
+        let (fitted, scaleBack) = CountingService.fitForTiling(huge, limit: 4032)
+        #expect(Swift.max(fitted.width, fitted.height) == 4032)
+        #expect(abs(scaleBack - 2.0) < 0.01)
+
+        let normal = try #require(makeImage(width: 4032, height: 3024))
+        let (untouched, factor) = CountingService.fitForTiling(normal, limit: 4032)
+        #expect(untouched.width == 4032)
+        #expect(factor == 1)
+    }
+
+    private func makeImage(width: Int, height: Int) -> CGImage? {
+        let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue
+        )
+        return context?.makeImage()
+    }
+
     @Test("Boxes become the centre-and-radius the UI draws")
     func boxesBecomeDetections() {
         let detections = Tiler.detections(from: [

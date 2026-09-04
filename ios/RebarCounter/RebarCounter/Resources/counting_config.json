@@ -1,5 +1,6 @@
 {
   "tileSize": 640,
+  "maxLongEdge": 4032,
   "overlap": 0.2,
   "edgeMarginRatio": 0.1,
   "iouThreshold": 0.35,
