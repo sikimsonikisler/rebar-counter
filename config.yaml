@@ -1,0 +1,221 @@
+# Rebar cross-section counter - all tunable values live here.
+# Rule: no magic numbers in code. If a threshold matters, it is on this page.
+# Lengths are in pixels of the *processing* image (see io.max_long_edge).
+
+io:
+  # Long edge the image is resized to before processing. Smaller = faster but
+  # cross-sections get tiny and watershed starts merging them. 0 = no resize.
+  max_long_edge: 1600
+  # Interpolation used when downscaling (area averaging keeps edges clean).
+  resize_interpolation: area          # area | linear | cubic
+
+preprocess:
+  clahe:
+    # Contrast Limited Adaptive Histogram Equalization: fixes shadow/glare so the
+    # dark gaps between bars survive in both the sunlit and the shaded half.
+    enabled: true
+    clip_limit: 1.5                   # higher = more local contrast, more noise
+    tile_grid: [8, 8]                 # image is split into this grid for equalization
+  bilateral:
+    # Edge-preserving denoise: smooths rust speckle without blurring the gap lines.
+    enabled: true
+    diameter: 9                       # neighbourhood diameter in px (odd, 5-9 sane)
+    sigma_color: 50                   # how different in intensity pixels may be and still mix
+    sigma_space: 50                   # how far apart in px pixels may be and still mix
+
+segment:
+  # Which binarization branch to use.
+  method: flatness                    # flatness | adaptive | canny
+
+  flatness:
+    # Default branch. A cut face is locally flat; whatever separates two bars is an
+    # edge - a dark shadow gap in a real stack, a bright background sliver in others.
+    # Foreground = the pixels whose deviation from the local mean sits in the flattest
+    # `keep_percentile` of the image. That excludes dark and bright separators alike
+    # and does not care how bright any individual bar happens to be, which is the
+    # failure mode that sinks a plain adaptive threshold on rusty-next-to-shiny bars.
+    block_size: 23                    # local-mean window in px (odd)
+    block_size_radius_ratio: 0.6      # pass 2 window = this x radius (0 = keep block_size)
+    keep_percentile: 64               # share of the flattest pixels kept as foreground
+
+  # Only used by the `adaptive` branch: are the cut faces brighter than the gaps
+  # between them (usual case, shiny steel) or darker (rusty bars on bright concrete)?
+  polarity: auto                      # bright | dark | auto
+  auto_polarity:
+    # In 'auto' mode both polarities are tried and the one whose foreground area
+    # fraction lands closest to this expectation wins. A tight rebar stack is mostly
+    # steel and only thin dark gaps, so foreground should dominate.
+    expected_foreground_ratio: 0.60
+    min_foreground_ratio: 0.15        # reject a polarity below this (clearly wrong)
+    max_foreground_ratio: 0.92        # reject a polarity above this (everything is foreground)
+
+  adaptive:
+    # Odd, and well BELOW a bar diameter: a window wider than a bar ends up comparing
+    # each bar against its neighbours, which loses every bar darker than the average.
+    block_size: 15
+    c: 6                              # subtracted from local mean; higher = less foreground
+
+  canny:
+    low: 40                           # hysteresis low threshold
+    high: 120                         # hysteresis high threshold
+    close_kernel: 3                   # closes 1px gaps in the edge map
+    close_iterations: 1
+    # Canny gives outlines, not filled blobs; edges are inverted to make the
+    # inside of each cross-section the foreground.
+    invert_edges: true
+
+  morphology:
+    open_kernel: 5                    # erode+dilate: deletes salt noise smaller than this
+    open_iterations: 1
+    close_kernel: 3                   # dilate+erode: fills pinholes inside a cross-section
+    close_iterations: 1
+
+  split:
+    # The step that separates touching cross-sections. Without it a tight stack
+    # is counted as one giant blob.
+    enabled: true
+    # nearest_seed - cut along the boundary between each pixel and its closest seed.
+    #                Pure geometry, so a bar cannot leak into its neighbour just
+    #                because the neighbour is a different shade of rust.
+    # watershed    - classic marker watershed flooded on the grayscale image.
+    method: nearest_seed              # nearest_seed | watershed
+    # How the seeds (one marker per bar) are found on the distance transform.
+    #   local_max   - one seed per local peak; robust when blobs merge (default)
+    #   global_ratio- classic dist > ratio * max(dist); simpler, undersegments big blobs
+    seed_method: local_max            # local_max | global_ratio
+    global_ratio: 0.45                # only used by seed_method: global_ratio
+    initial_peak_kernel: 7            # first-pass peak search window in px (odd)
+    min_peak_distance_px: 2.0         # ignore distance-transform peaks thinner than this
+    peak_kernel_radius_ratio: 1.4     # second pass: peak window = this x estimated radius
+    min_peak_dist_radius_ratio: 0.35  # second pass: peak must be this x radius from an edge
+    background_dilate_kernel: 3       # dilation that produces the "sure background" ring
+    background_dilate_iterations: 3
+
+  two_pass:
+    # Automatic scale estimation: pass 1 finds the bar radius, pass 2 re-seeds the
+    # split at that scale and re-filters candidates. Removes the need to ask the
+    # user for the bar diameter.
+    enabled: true
+
+detect:
+  radius_estimate:
+    # area_weighted_mode - the radius bin holding the most *area*. Bars carry nearly
+    #                      all the area while noise fragments are many but tiny, so
+    #                      this survives a messy pass 1 where a plain median does not.
+    # median             - median radius of the surviving candidates.
+    method: area_weighted_mode        # area_weighted_mode | median
+    histogram_bins: 40
+    min_detections: 8                 # below this the estimate is noise; keep pass 1
+
+  # Absolute guards, applied in the first pass when no scale estimate exists yet.
+  absolute:
+    min_area_px: 30                   # anything smaller is dirt/noise
+    max_area_px: 60000                # anything bigger is background, not a bar
+  # Scale-relative guards, applied once the median radius R is known.
+  relative:
+    min_area_ratio: 0.30              # min area = ratio * pi * R^2
+    max_area_ratio: 1.60              # max area = ratio * pi * R^2
+  shape:
+    min_circularity: 0.45             # 4*pi*A / P^2 ; 1.0 = perfect circle
+    min_fill_ratio: 0.70              # A / (pi * minEnclosingCircle_r^2) ; catches crescents
+  radius_outlier:
+    # SPEC 4: candidates outside +/-40% of the median radius are dropped.
+    enabled: true
+    low_ratio: 0.60
+    high_ratio: 1.40
+  # Detections whose centres are closer than this x radius are merged (watershed
+  # occasionally splits one bar into two slivers).
+  merge_distance_ratio: 0.55
+
+hough:
+  # Alternative branch, kept for comparison. Misses touching bars, so it is off.
+  enabled: false
+  dp: 1.2                             # accumulator resolution divisor
+  min_dist_radius_ratio: 1.4          # min centre distance = this x estimated radius
+  param1: 100                         # Canny high threshold used internally
+  param2: 18                          # accumulator threshold; lower = more circles
+  min_radius_ratio: 0.60              # searched radius window, relative to estimate
+  max_radius_ratio: 1.40
+  fallback_radius_px: 12              # radius estimate when no prior pass exists
+
+draw:
+  dot_radius_ratio: 0.28              # marker dot radius = this x detected radius
+  dot_min_radius_px: 2
+  dot_color_bgr: [40, 60, 255]        # marker dot
+  circle_color_bgr: [60, 220, 90]     # outline around each detection
+  circle_thickness: 1
+  draw_circles: true                  # outline every detection, not just the dot
+  banner_height_ratio: 0.09           # count banner height as a fraction of image height
+  banner_color_bgr: [24, 24, 24]
+  text_color_bgr: [255, 255, 255]
+  font_scale_ratio: 0.0016            # font scale = this x image height
+  font_thickness_ratio: 0.0022        # stroke width = this x image height (min 1)
+
+prelabel:
+  # Phase 2: the baseline's own output becomes the first draft of the labels, so a
+  # human only corrects instead of clicking every bar from scratch.
+  class_name: rebar
+  class_index: 0
+  # Detections are circles, labelling tools want boxes: side = this x the radius.
+  box_side_radius_ratio: 2.0
+  label_studio:
+    # Prefix Label Studio prepends to a local filename when it serves the image.
+    image_root: "/data/local-files/?d="
+    from_name: label                  # must match the <RectangleLabels name=...> in the UI
+    to_name: image                    # must match the <Image name=...> in the UI
+
+ml:
+  tiling:
+    # A photo holds 300-600 cross-sections. Shrunk to 640x640 each one is a few
+    # pixels wide and the detector cannot see it, so the image is cut into
+    # overlapping tiles, each tile is detected on, and the results are merged back
+    # into global coordinates (the SAHI idea, written out by hand here).
+    tile_size: 640                    # square tile side in px
+    overlap: 0.20                     # neighbouring tiles share this fraction of a side
+    min_tiles: 1                      # never produce fewer than this many tiles per axis
+    edge_margin_ratio: 0.10           # drop detections this close to a tile edge unless
+                                      # the edge is also the image edge (they are cut off)
+    # Training slices the photos the same way inference does, so the model always sees
+    # bars at their native pixel size instead of a shrunken whole photo.
+    train_min_box_visibility: 0.60    # keep a clipped label only if this much area survives
+    train_min_boxes_per_tile: 1       # skip tiles emptier than this
+  nms:
+    iou_threshold: 0.35               # merge boxes overlapping more than this
+    score_threshold: 0.25             # discard detections below this confidence
+    # A dense 640px tile can hold 150-400 cross-sections. YOLO's stock cap of 300
+    # would silently truncate the count, which is the one error this app cannot make.
+    max_detections_per_tile: 1200
+  train:
+    model: yolo11n.pt                 # nano: converts to Core ML cleanly, fast on phone
+    epochs: 60
+    image_size: 640                   # matches tiling.tile_size
+    batch: 16
+    patience: 15                      # early stop after this many epochs with no gain
+    val_fraction: 0.15                # share of the training set held out for validation
+    seed: 0
+    augment:
+      # Cross-sections are rotation invariant, so rotation is free extra data.
+      degrees: 180.0
+      scale: 0.35                     # +/- this fraction of the original scale
+      translate: 0.10
+      fliplr: 0.5
+      flipud: 0.5
+      hsv_h: 0.015                    # rust/paint colour shift
+      hsv_s: 0.5
+      hsv_v: 0.4                      # sun vs shade
+      mosaic: 1.0
+      close_mosaic: 10                # disable mosaic for the last N epochs
+      erasing: 0.0                    # would delete whole bars; the count is the label
+  # Where count.py --method ml looks for weights when --weights is not given.
+  weights: runs/rebar/weights/best.pt
+
+  export:
+    # float16 weights: half the file, no measurable loss. Passed to ultralytics as
+    # `quantize=16`; the older `half=True` flag breaks the Detect head conversion.
+    quantize_float16: true
+    compare_images: 20                # Python vs Core ML agreement check after export
+
+eval:
+  # data/eval/ filenames follow: YYYYMMDD_hhmm_<truecount>_<diameter>_<condition>.jpg
+  filename_pattern: '^\d{8}_\d{4}_(?P<count>\d+)_(?P<diameter>\d+)_(?P<condition>[^.]+)\.(jpg|jpeg|png|JPG|JPEG|PNG)$'
+  within_tolerance: 2                 # the "+/-N pieces" success band reported in the summary

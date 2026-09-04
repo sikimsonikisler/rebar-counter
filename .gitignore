@@ -1,0 +1,42 @@
+# Photos and labels never enter version control (SPEC 5).
+data/raw/*
+data/labels/*
+data/eval/*
+data/yolo/
+!data/**/.gitkeep
+
+# Generated: synthetic sets, debug stages, evaluation output, training runs.
+out/
+debug/
+runs/
+*.png.debug
+
+# Models. Training checkpoints stay out; the exported phone model is committed on
+# purpose, so a fresh clone builds an app that can actually count.
+*.pt
+*.onnx
+*.mlmodel
+*.mlpackage/
+!ios/RebarCounter/RebarCounter/Resources/**
+
+# Python. Two environments: .venv for everything, .venv-coreml for the Core ML
+# export only (coremltools ships no native extensions for Python 3.14).
+.venv/
+.venv-coreml/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Xcode. `-derivedDataPath build` puts several thousand build artefacts here.
+ios/**/build/
+ios/**/build-*/
+ios/**/DerivedData/
+ios/**/xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/

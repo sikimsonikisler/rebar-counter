@@ -1,0 +1,9 @@
+{
+  "tileSize": 640,
+  "overlap": 0.2,
+  "edgeMarginRatio": 0.1,
+  "iouThreshold": 0.35,
+  "scoreThreshold": 0.25,
+  "maxDetectionsPerTile": 1200,
+  "modelName": "RebarDetector"
+}
